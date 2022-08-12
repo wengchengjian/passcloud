@@ -1,16 +1,15 @@
 use crate::file::write_content;
 use crate::{
-    decrypt_from_utf8, get_config_path, get_pass_file_path, get_pass_home, get_pass_path, Config,
-    Password, Passwords, TIME_FMT,
+    decrypt_from_utf8, get_config_path, get_pass_path, Config, Password, Passwords, TIME_FMT,
 };
-use chrono::format::Fixed::TimezoneOffset;
-use chrono::format::Parsed;
-use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, Local, NaiveDateTime, Utc};
 use clipboard::windows_clipboard::WindowsClipboardContext;
 use clipboard::ClipboardProvider;
 use std::collections::HashMap;
-use std::error::Error;
 use std::fs::File;
+use std::net::SocketAddr;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::stream::StreamExt;
 
 pub fn handle_pass_config_cli(config: &mut Config, new_config: Config) {
     config.debug = new_config.debug;
@@ -52,56 +51,56 @@ pub fn get_last_password(passwords: &Vec<Password>) -> Option<Password> {
     return password;
 }
 
-pub fn handle_get_cli(load_pass: &Passwords, app: Option<String>, key: Option<String>, last: bool) {
-    if let Some(app) = app {
-        // 列出该应用下的所有密码
-        if let Some(applications) = load_pass.get(&app) {
-            if let Some(key) = key {
-                println!("{} -> {}", app, key);
-                if let Some(passwords) = applications.get(&key) {
-                    if !last {
-                        for pass in passwords {
-                            println!(
-                                "------ password:{},version:{} createAt:{}",
-                                String::from(decrypt_from_utf8(&pass.content).trim()),
-                                pass.version,
-                                pass.timestamp
-                            );
-                        }
-                    } else {
-                        if let Some(last_pass) = get_last_password(passwords) {
-                            let password =
-                                String::from(decrypt_from_utf8(&last_pass.content).trim());
-                            println!(
-                                "------ latest password:{},version:{} createAt:{}",
-                                password, last_pass.version, last_pass.timestamp
-                            );
-                            let mut provider = WindowsClipboardContext::new().unwrap();
-                            provider
-                                .set_contents(password)
-                                .expect("复制密码到缓冲区失败");
-                        }
-                    }
-                }
-            } else {
-                for (key, passwords) in applications {
-                    println!("{} -> {}", app, key);
+pub fn handle_get_cli(
+    load_pass: &Passwords,
+    app: String,
+    key: Option<String>,
+    list: bool,
+) -> Result<(), String> {
+    // 列出该应用下的所有密码
+    if let Some(applications) = load_pass.get(&app) {
+        if let Some(key) = key {
+            println!("{} -> {}", app, key);
+            if let Some(passwords) = applications.get(&key) {
+                if list {
                     for pass in passwords {
                         println!(
                             "------ password:{},version:{} createAt:{}",
-                            decrypt_from_utf8(&pass.content),
+                            String::from(decrypt_from_utf8(&pass.content).trim()),
                             pass.version,
                             pass.timestamp
                         );
                     }
+                } else {
+                    if let Some(last_pass) = get_last_password(passwords) {
+                        let password = String::from(decrypt_from_utf8(&last_pass.content).trim());
+                        println!(
+                            "------ latest password:{},version:{} createAt:{}",
+                            password, last_pass.version, last_pass.timestamp
+                        );
+                        let mut provider = WindowsClipboardContext::new().unwrap();
+                        provider
+                            .set_contents(password)
+                            .expect("复制密码到缓冲区失败");
+                    }
                 }
             }
         } else {
-            println!("无此应用:{}", app);
+            for (key, passwords) in applications {
+                println!("{} -> {}", app, key);
+                for pass in passwords {
+                    println!(
+                        "------ password:{},version:{} createAt:{}",
+                        decrypt_from_utf8(&pass.content),
+                        pass.version,
+                        pass.timestamp
+                    );
+                }
+            }
         }
-    } else {
-        println!("App is Empty")
     }
+
+    Ok(())
 }
 
 pub fn handle_set_cli(
@@ -109,7 +108,7 @@ pub fn handle_set_cli(
     app: &Option<String>,
     key: &Option<String>,
     password: Option<String>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), String> {
     // 指定app
     if let Some(app) = app {
         let applications = load_pass.entry(app.clone()).or_insert(HashMap::new());
@@ -125,18 +124,36 @@ pub fn handle_set_cli(
                 }
                 passwords.push(password);
 
-                let mut file = File::create(get_pass_path().unwrap())?;
+                let mut file = File::create(get_pass_path().unwrap())
+                    .map_err(|_| String::from("密码文件打开失败"))?;
                 // 回写进密码存储文件
-                write_content(&mut file, load_pass)?;
+                write_content(&mut file, load_pass).map_err(|_| String::from("密码存储失败"))?;
             } else {
-                println!("密码不能为空");
+                return Err(String::from("密码为空"));
             }
         } else {
-            println!("Key is Empty!");
+            return Err(String::from("key不能为空"));
         }
     } else {
-        println!("App is Empty")
+        return Err(String::from("应用不能为空"));
     }
-
     Ok(())
 }
+
+pub fn handle_push_pass(config: &Config, pass: &Passwords) {}
+
+pub fn handle_pull_pass(config: &Config, pass: &Passwords) {}
+
+const ADDRESS: &str = "127.0.0.1:9786";
+
+pub async fn start_async_server() {
+    let listener = TcpListener::bind(ADDRESS).await.unwrap();
+    loop {
+        let (stream, socket) = listener.accept().await.unwrap();
+        let handle = tokio::spawn(async move {
+            process(stream).await;
+        });
+    }
+}
+
+async fn process(socket: TcpStream) {}

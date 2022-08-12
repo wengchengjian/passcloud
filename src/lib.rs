@@ -1,7 +1,7 @@
-use chrono::{Date, DateTime, Local};
+use chrono::Local;
 use clap::{Parser, Subcommand};
 use passwords::{analyzer, scorer, PasswordGenerator};
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs::File;
@@ -17,23 +17,37 @@ pub mod handle;
 #[clap(author = "wengchengjian", version = "1.0.0", about = "密码管理工具", long_about = None)]
 pub struct Cli {
     #[clap(subcommand)]
-    pub command: Option<Commands>,
+    pub command: Commands,
 }
 
 pub type Passwords = HashMap<String, HashMap<String, Vec<Password>>>;
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// 向云端推送本地密码文件
+    PUSH {
+        /// 推送所有数据
+        #[clap(short, long, action, value_parser)]
+        all: bool,
+    },
+    /// 从云端拉取密码文件
+    PULL {
+        /// 拉取所有数据
+        #[clap(short, long, action, value_parser)]
+        all: bool,
+    },
+
     GET {
         /// 应用
         #[clap(value_parser)]
-        app: Option<String>,
+        app: String,
 
         /// key可以是账号，或者某个关键词
         #[clap(value_parser)]
         key: Option<String>,
-        #[clap(long, value_parser, default_value = "true")]
-        last: bool,
+
+        #[clap(long, value_parser)]
+        list: bool,
     },
     SET {
         /// 应用
@@ -75,6 +89,9 @@ pub enum Commands {
 
         #[clap(long, value_parser, value_name = "CONFIG")]
         config: Option<PathBuf>,
+
+        #[clap(long, value_parser, value_name = "MODE")]
+        run_mode: Option<String>,
     },
 }
 
@@ -113,6 +130,9 @@ pub struct Config {
 
     pub debug: bool,
 
+    /// 应用模式,默认为Client
+    pub mode: Mode,
+
     pub cloud_address: Option<String>,
 
     pub username: Option<String>,
@@ -120,11 +140,18 @@ pub struct Config {
     pub password: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum Mode {
+    Server,
+    Client,
+}
+
 impl Config {
     pub fn new() -> Self {
         Self {
             offline: true,
             debug: false,
+            mode: Mode::Client,
             cloud_address: Some(String::new()),
             username: Some(String::new()),
             password: Some(String::new()),
@@ -137,6 +164,7 @@ impl Config {
         cloud_address: Option<String>,
         username: Option<String>,
         password: Option<String>,
+        mode: Mode,
     ) -> Self {
         Self {
             offline,
@@ -144,6 +172,7 @@ impl Config {
             cloud_address,
             username,
             password,
+            mode,
         }
     }
 
@@ -228,7 +257,12 @@ pub fn load_pass() -> Result<Passwords, Box<dyn Error>> {
 
 pub fn get_pass_home() -> Option<String> {
     let env_vars: HashMap<String, String> = env::vars().collect();
-    return Some(env_vars.get("PASS_HOME").unwrap().clone());
+    return Some(
+        env_vars
+            .get("PASS_HOME")
+            .expect("没有设置PASS_HOME")
+            .clone(),
+    );
 }
 
 pub fn get_config_path() -> Option<String> {
@@ -244,6 +278,7 @@ pub fn get_pass_file_path(re_path: &str) -> Option<String> {
         None
     }
 }
+
 pub fn get_pass_path() -> Option<String> {
     return get_pass_file_path(PASSPATH);
 }
