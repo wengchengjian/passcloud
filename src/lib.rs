@@ -24,7 +24,7 @@ pub type Passwords = HashMap<String, HashMap<String, Vec<Password>>>;
 
 #[derive(Subcommand)]
 pub enum Commands {
-    GET {
+    Get {
         /// 应用
         #[clap(value_parser)]
         app: Option<String>,
@@ -35,7 +35,7 @@ pub enum Commands {
         #[clap(long, value_parser, default_value = "true")]
         last: bool,
     },
-    SET {
+    Set {
         /// 应用
         #[clap(value_parser, value_name = "APP")]
         app: Option<String>,
@@ -46,7 +46,7 @@ pub enum Commands {
         #[clap(value_name = "PASSWORD")]
         password: Option<String>,
     },
-    GEN {
+    Gen {
         /// 应用
         #[clap(value_parser, value_name = "APP")]
         app: Option<String>,
@@ -57,13 +57,7 @@ pub enum Commands {
         #[clap(short, long, action)]
         length: Option<usize>,
     },
-    CONFIG {
-        #[clap(long, value_parser, value_name = "OFFLINE")]
-        offline: bool,
-
-        #[clap(long, value_parser, value_name = "DEBUG")]
-        debug: bool,
-
+    Config {
         #[clap(long, value_parser, value_name = "CLOUD_ADDRESS")]
         cloud_address: Option<String>,
 
@@ -76,6 +70,34 @@ pub enum Commands {
         #[clap(long, value_parser, value_name = "CONFIG")]
         config: Option<PathBuf>,
     },
+    Client {
+        #[clap(subcommand)]
+        cmd: ClientSubCmd,
+    },
+    Server {
+        #[clap(subcommand)]
+        cmd: ServerSubCmd,
+    },
+}
+
+pub type Authorizations = HashMap<String, String>;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Authorization {
+    username: String,
+    password: String,
+}
+
+#[derive(Subcommand, Clone)]
+pub enum ClientSubCmd {
+    Push,
+    Pull,
+}
+
+#[derive(Subcommand, Clone)]
+pub enum ServerSubCmd {
+    Start,
+    Stop,
 }
 
 pub const TIME_FMT: &str = "%Y年%m月%d日 %H:%M:%S";
@@ -109,10 +131,6 @@ pub const PASSPATH: &str = "\\.password";
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Config {
-    pub offline: bool,
-
-    pub debug: bool,
-
     pub cloud_address: Option<String>,
 
     pub username: Option<String>,
@@ -123,8 +141,6 @@ pub struct Config {
 impl Config {
     pub fn new() -> Self {
         Self {
-            offline: true,
-            debug: false,
             cloud_address: Some(String::new()),
             username: Some(String::new()),
             password: Some(String::new()),
@@ -132,15 +148,11 @@ impl Config {
     }
 
     pub fn from_args(
-        offline: bool,
-        debug: bool,
         cloud_address: Option<String>,
         username: Option<String>,
         password: Option<String>,
     ) -> Self {
         Self {
-            offline,
-            debug,
             cloud_address,
             username,
             password,
@@ -226,6 +238,15 @@ pub fn load_pass() -> Result<Passwords, Box<dyn Error>> {
     )?)
 }
 
+pub fn load_auth_file() -> Result<Authorization, Box<dyn Error>> {
+    fs::create_dir_all(Path::new(&get_pass_home().unwrap()))?;
+    // 创建一个默认的密码文件
+    Ok(file::load_content(
+        &get_pass_path().unwrap(),
+        Some(Passwords::new()),
+    )?)
+}
+
 pub fn get_pass_home() -> Option<String> {
     let env_vars: HashMap<String, String> = env::vars().collect();
     return Some(env_vars.get("PASS_HOME").unwrap().clone());
@@ -250,4 +271,36 @@ pub fn get_pass_path() -> Option<String> {
 
 pub fn decrypt_from_utf8(arr: &Vec<u8>) -> String {
     String::from_utf8(encrypt::decrypt(&arr).expect("解密失败")).expect("字节数组转字符串失败")
+}
+
+pub fn check_authorization(auth: &Authorization) -> bool {
+    false
+}
+
+pub fn check_cloud_config(config: &Config) -> Result<(), String> {
+    if let Some(address) = &config.cloud_address {
+        if address.is_empty() {
+            Err(String::from("云端地址不能为空"))
+        } else {
+            if let Some(username) = &config.username {
+                if username.is_empty() {
+                    Err(String::from("用户名不能为空"))
+                } else {
+                    if let Some(password) = &config.password {
+                        if password.is_empty() {
+                            Err(String::from("密码不能为空"))
+                        } else {
+                            Ok(())
+                        }
+                    } else {
+                        Err(String::from("密码不能为空"))
+                    }
+                }
+            } else {
+                Err(String::from("用户名不能为空"))
+            }
+        }
+    } else {
+        Err(String::from("云端地址不能为空"))
+    }
 }

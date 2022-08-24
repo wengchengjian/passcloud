@@ -1,20 +1,19 @@
 use crate::file::write_content;
 use crate::{
-    decrypt_from_utf8, get_config_path, get_pass_file_path, get_pass_home, get_pass_path, Config,
-    Password, Passwords, TIME_FMT,
+    decrypt_from_utf8, get_config_path, get_pass_file_path, get_pass_home, get_pass_path,
+    load_pass, Authorization, Config, Password, Passwords, TIME_FMT,
 };
-use chrono::format::Fixed::TimezoneOffset;
-use chrono::format::Parsed;
-use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
 use clipboard::windows_clipboard::WindowsClipboardContext;
 use clipboard::ClipboardProvider;
+use serde::{Deserialize, Serialize, Serializer};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs::File;
+use tokio::io::AsyncReadExt;
+use tokio::net::{TcpListener, TcpStream};
 
 pub fn handle_pass_config_cli(config: &mut Config, new_config: Config) {
-    config.debug = new_config.debug;
-
     if let Some(username) = new_config.username {
         config.username = Some(username);
     }
@@ -22,8 +21,6 @@ pub fn handle_pass_config_cli(config: &mut Config, new_config: Config) {
     if let Some(password) = new_config.password {
         config.password = Some(password);
     }
-
-    config.offline = new_config.offline;
 
     if let Some(cloud_address) = new_config.cloud_address {
         config.cloud_address = Some(cloud_address);
@@ -140,3 +137,43 @@ pub fn handle_set_cli(
 
     Ok(())
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum ReqCommand {
+    Push {
+        auth: Authorization,
+        passwords: Passwords,
+    },
+    Pull {
+        auth: Authorization,
+    },
+}
+
+async fn process_request(mut socket: TcpStream) {
+    let mut str_req = String::new();
+    socket
+        .read_to_string(&mut str_req)
+        .await
+        .expect("读取请求数据失败");
+    let cmd: ReqCommand = serde_json::from_str(&str_req).expect("序列化数据失败!");
+    match cmd {
+        ReqCommand::Pull { auth } => {}
+        ReqCommand::Push { auth, passwords } => {}
+    }
+}
+
+pub async fn handle_start_cloud_server(config: &Config) {
+    let listener = TcpListener::bind("127.0.0.1:7898").await.unwrap();
+
+    loop {
+        let (socket, _) = listener.accept().await.unwrap();
+        tokio::spawn(async move {
+            process_request(socket).await;
+        });
+    }
+}
+pub async fn handle_stop_cloud_server() {}
+
+pub async fn handle_pull_pass(config: &Config) {}
+
+pub async fn handle_push_pass(config: &Config, pass: Passwords) {}
