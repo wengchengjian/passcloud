@@ -1,11 +1,10 @@
-use crate::{CONFIG_FILE, PASSPATH};
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::error::Error;
 use std::fs;
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::fs::File;
+use std::io::Write;
+use std::path::Path;
 
 pub fn write_content<T>(file: &mut File, t: &T) -> Result<(), Box<dyn Error>>
 where
