@@ -1,5 +1,6 @@
 use chrono::{Date, DateTime, Local};
 use clap::{Parser, Subcommand};
+use log::{error, info, warn};
 use passwords::{analyzer, scorer, PasswordGenerator};
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::HashMap;
@@ -12,6 +13,8 @@ use std::{env, fs};
 mod encrypt;
 pub mod file;
 pub mod handle;
+mod response;
+mod request;
 
 #[derive(Parser)]
 #[clap(author = "wengchengjian", version = "1.0.0", about = "密码管理工具", long_about = None)]
@@ -20,7 +23,8 @@ pub struct Cli {
     pub command: Option<Commands>,
 }
 
-pub type Passwords = HashMap<String, HashMap<String, Vec<Password>>>;
+// user->(app->(key->vec<pass>))
+pub type Passwords = HashMap<String, HashMap<String, HashMap<String, Vec<Password>>>>;
 
 #[derive(Subcommand)]
 pub enum Commands {
@@ -69,6 +73,9 @@ pub enum Commands {
 
         #[clap(long, value_parser, value_name = "CONFIG")]
         config: Option<PathBuf>,
+
+        #[clap(long, value_parser, value_name = "ADDRESS")]
+        address: Option<String>,
     },
     Client {
         #[clap(subcommand)]
@@ -129,9 +136,15 @@ pub enum Encrypter {
 
 pub const PASSPATH: &str = "\\.password";
 
+pub const AUTHPATH: &str = "\\.authorization";
+
+pub const DEFAULT_ADDRESS: &str = "127.0.0.1:7879";
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Config {
     pub cloud_address: Option<String>,
+
+    pub address: Option<String>,
 
     pub username: Option<String>,
 
@@ -144,6 +157,7 @@ impl Config {
             cloud_address: Some(String::new()),
             username: Some(String::new()),
             password: Some(String::new()),
+            address: Some(String::from(DEFAULT_ADDRESS)),
         }
     }
 
@@ -151,11 +165,13 @@ impl Config {
         cloud_address: Option<String>,
         username: Option<String>,
         password: Option<String>,
+        address: Option<String>,
     ) -> Self {
         Self {
             cloud_address,
             username,
             password,
+            address,
         }
     }
 
@@ -191,30 +207,29 @@ pub fn function_score(password: &str) {
 
     match score {
         score if score <= 20f64 => {
-            println!("your password is very dangerous (may be cracked within few seconds)")
+            warn!("your password is very dangerous (may be cracked within few seconds)")
         }
         score if score <= 40f64 => {
-            println!("your password is dangerous")
+            warn!("your password is dangerous")
         }
         score if score <= 60f64 => {
-            println!("your password is very weak")
+            warn!("your password is very weak")
         }
         score if score <= 80f64 => {
-            println!("your password is weak")
+            warn!("your password is weak")
         }
         score if score <= 90f64 => {
-            println!("your password is good")
+            info!("your password is good")
         }
         score if score <= 95f64 => {
-            println!("your password is strong")
+            info!("your password is strong")
         }
         score if score <= 99f64 => {
-            println!("your password is very strong")
+            info!("your password is very strong")
         }
-        score if score <= 100f64 => {
-            println!("your password is invulnerable")
+        _ => {
+            info!("your password is invulnerable")
         }
-        _ => {}
     }
 }
 
@@ -238,12 +253,12 @@ pub fn load_pass() -> Result<Passwords, Box<dyn Error>> {
     )?)
 }
 
-pub fn load_auth_file() -> Result<Authorization, Box<dyn Error>> {
+pub fn load_auth_file() -> Result<Authorizations, Box<dyn Error>> {
     fs::create_dir_all(Path::new(&get_pass_home().unwrap()))?;
     // 创建一个默认的密码文件
     Ok(file::load_content(
-        &get_pass_path().unwrap(),
-        Some(Passwords::new()),
+        &get_auth_path().unwrap(),
+        Some(Authorizations::new()),
     )?)
 }
 
@@ -269,12 +284,66 @@ pub fn get_pass_path() -> Option<String> {
     return get_pass_file_path(PASSPATH);
 }
 
+pub fn get_auth_path() -> Option<String> {
+    return get_pass_file_path(AUTHPATH);
+}
+
 pub fn decrypt_from_utf8(arr: &Vec<u8>) -> String {
     String::from_utf8(encrypt::decrypt(&arr).expect("解密失败")).expect("字节数组转字符串失败")
 }
 
 pub fn check_authorization(auth: &Authorization) -> bool {
-    false
+    match load_auth_file() {
+        Err(e) => {
+            error!("加载认证密码文件失败,原因:{}", e);
+            false
+        }
+        Ok(authorizations) => {
+            if authorizations.contains_key(&auth.username) {
+                if let Some(password) = authorizations.get(&auth.username) {
+                    return password.eq(&auth.password);
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        }
+    }
+}
+
+pub fn check_authorization_config() -> bool {
+    match load_config() {
+        Err(e) => {
+            error!("加载配置文件失败,原因:{}", e);
+            false
+        }
+        Ok(config) => {
+            if let Some(_) = config.username {
+                if let Some(_) = config.password {
+                    true
+                } else {
+                    error!("密码不能为空");
+                    false
+                }
+            } else {
+                error!("用户名不能为空");
+                false
+            }
+        }
+    }
+}
+
+pub fn check_common_config(config: &Config) -> Result<(), String> {
+    if let Some(username) = &config.username {
+        if username.is_empty() {
+            Err(String::from("用户名不能为空"))
+        } else {
+            Ok(())
+        }
+    } else {
+        Err(String::from("用户名不能为空"))
+    }
 }
 
 pub fn check_cloud_config(config: &Config) -> Result<(), String> {
