@@ -9,12 +9,14 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::{env, fs};
+use tokio::io::{AsyncReadExt, ReadHalf};
+use tokio::net::TcpStream;
 
 mod encrypt;
 pub mod file;
 pub mod handle;
-mod response;
 mod request;
+mod response;
 
 #[derive(Parser)]
 #[clap(author = "wengchengjian", version = "1.0.0", about = "密码管理工具", long_about = None)]
@@ -36,7 +38,7 @@ pub enum Commands {
         /// key可以是账号，或者某个关键词
         #[clap(value_parser)]
         key: Option<String>,
-        #[clap(long, value_parser, default_value = "true")]
+        #[clap(long, value_parser, default_value = "false")]
         last: bool,
     },
     Set {
@@ -99,6 +101,7 @@ pub struct Authorization {
 pub enum ClientSubCmd {
     Push,
     Pull,
+    Register,
 }
 
 #[derive(Subcommand, Clone)]

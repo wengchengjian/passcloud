@@ -10,4 +10,12 @@ pub enum ReqCommand {
     Pull {
         auth: Authorization,
     },
+
+    Stop {
+        auth: Authorization,
+    },
+
+    Register {
+        auth: Authorization,
+    },
 }

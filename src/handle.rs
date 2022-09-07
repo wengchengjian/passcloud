@@ -3,18 +3,21 @@ use crate::request::ReqCommand;
 use crate::response::{PullPasswords, ResponseCode, ServerResponse};
 use crate::{
     check_authorization, check_authorization_config, check_common_config, decrypt_from_utf8,
-    get_config_path, get_pass_file_path, get_pass_home, get_pass_path, load_config, load_pass,
-    Authorization, Config, Password, Passwords, TIME_FMT,
+    get_auth_path, get_config_path, get_pass_file_path, get_pass_home, get_pass_path,
+    load_auth_file, load_config, load_pass, Authorization, Config, Password, Passwords, TIME_FMT,
 };
-use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, Local, NaiveDateTime, Utc};
 use clipboard::windows_clipboard::WindowsClipboardContext;
 use clipboard::ClipboardProvider;
 use log::{error, info, warn};
-use serde::{Deserialize, Serialize, Serializer};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs::File;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::net::tcp::{ReadHalf, WriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 
 pub fn handle_pass_config_cli(config: &mut Config, new_config: Config) {
@@ -67,19 +70,32 @@ pub fn handle_get_cli(
             // 列出该应用下的所有密码
             if let Some(applications) = load_pass.get(&app) {
                 if let Some(key) = key {
-                    info!("{} -> {}", app, key);
+                    info!("------ {} -> {}", app, key);
                     if let Some(passwords) = applications.get(&key) {
+                        let mut passwords = passwords.clone();
+                        // 按照时间降序排序
+                        passwords.sort_by(|a, b| {
+                            let a_data_time = NaiveDateTime::parse_from_str(&a.timestamp, TIME_FMT)
+                                .map(|ndt| DateTime::<Utc>::from_utc(ndt, Utc))
+                                .unwrap();
+
+                            let b_data_time = NaiveDateTime::parse_from_str(&b.timestamp, TIME_FMT)
+                                .map(|ndt| DateTime::<Utc>::from_utc(ndt, Utc))
+                                .unwrap();
+                            return b_data_time.timestamp().cmp(&a_data_time.timestamp());
+                        });
+
                         if !last {
                             for pass in passwords {
                                 info!(
-                                    "------ password:{},version:{} createAt:{}",
+                                    "------ password: {},version: {} createAt: {}",
                                     String::from(decrypt_from_utf8(&pass.content).trim()),
                                     pass.version,
                                     pass.timestamp
                                 );
                             }
                         } else {
-                            if let Some(last_pass) = get_last_password(passwords) {
+                            if let Some(last_pass) = passwords.first() {
                                 let password =
                                     String::from(decrypt_from_utf8(&last_pass.content).trim());
                                 info!(
@@ -125,10 +141,10 @@ pub fn handle_set_cli(
     let username = (&load_config.username).clone().unwrap();
 
     //指定用户
-    let load_pass = load_pass.entry(username).or_insert(HashMap::new());
+    let user_pass = load_pass.entry(username).or_insert(HashMap::new());
     // 指定app
     if let Some(app) = app {
-        let applications = load_pass.entry(app.clone()).or_insert(HashMap::new());
+        let applications = user_pass.entry(app.clone()).or_insert(HashMap::new());
         // 指定key,必须
         if let Some(key) = key {
             // 密码必须
@@ -157,104 +173,199 @@ pub fn handle_set_cli(
     Ok(())
 }
 
-async fn process_request(mut socket: TcpStream) {
-    let mut str_req = String::new();
-    socket
-        .read_to_string(&mut str_req)
-        .await
-        .expect("读取请求数据失败");
+async fn write_cmd<T>(cmd: ServerResponse<T>, writer: &mut BufWriter<WriteHalf>)
+where
+    T: Serialize,
+{
+    let pass_str = serde_json::to_string(&cmd).expect("序列化返回值失败");
+
+    writer.write_all(&pass_str.as_bytes()).await.unwrap();
+    // 写入命令结束标志
+    let _ = writer.write_u8(b'\n').await.unwrap();
+    writer.flush().await.unwrap();
+}
+
+async fn process_request(mut socket: TcpStream, addr: SocketAddr) {
+    let ip_addr = addr.ip();
+
+    let (mut reader, writer) = socket.split();
+
+    let mut writer = BufWriter::new(writer);
+
+    let str_req = read_to_string(&mut reader).await;
+    info!("receive str:{str_req}");
     let cmd: ReqCommand = serde_json::from_str(&str_req).expect("序列化数据失败!");
     match cmd {
         ReqCommand::Pull { auth } => {
             if check_authorization(&auth) {
+                info!(
+                    "accept {} request from remote ip: {},username: {}",
+                    "pull", ip_addr, auth.username
+                );
+                let mut load_pass = load_pass().expect("加载密码文件失败");
+
+                let pull_pass = load_pass.entry(auth.username).or_insert(HashMap::new());
+
+                let res = ServerResponse {
+                    code: ResponseCode::Success,
+                    data: pull_pass,
+                    msg: "pull 命令成功".to_string(),
+                };
+                write_cmd(res, &mut writer);
             } else {
                 info!("认证失败");
+                let res = ServerResponse {
+                    code: ResponseCode::Failure,
+                    data: (),
+                    msg: "认证失败".to_string(),
+                };
+                write_cmd(res, &mut writer);
             }
         }
         ReqCommand::Push { auth, passwords } => {
             if check_authorization(&auth) {
+                info!(
+                    "accept {} request from remote ip: {},username: {}",
+                    "push", ip_addr, auth.username
+                );
+
+                let mut load_pass = load_pass().expect("加载密码文件失败");
+
+                for (username, pass) in passwords {
+                    load_pass.insert(username, pass);
+                }
+
+                let mut file = File::create(get_pass_path().unwrap()).expect("打开密码文件失败");
+                // 回写进密码存储文件
+                write_content(&mut file, &load_pass).expect("写入密码文件失败");
+
+                let res = ServerResponse {
+                    code: ResponseCode::Success,
+                    data: (),
+                    msg: "push成功".to_string(),
+                };
+                let pass_str = serde_json::to_string(&res).expect("序列化返回值失败");
+
+                writer
+                    .write_all(&pass_str.as_bytes())
+                    .await
+                    .expect("push命令响应失败");
+                // 写入命令结束标志
+                let _ = writer.write_u8(b'\n').await.unwrap();
             } else {
                 info!("认证失败");
             }
         }
+        ReqCommand::Stop { auth } => {
+            if check_authorization(&auth) {
+                info!(
+                    "accept {} request from remote ip: {},username: {}",
+                    "stop", ip_addr, auth.username
+                );
+
+                unsafe {
+                    RUNNING.store(false, Ordering::Release);
+                }
+            } else {
+                info!("认证失败");
+            }
+        }
+        ReqCommand::Register { auth } => {
+            info!(
+                "accept {} request from remote ip: {},username: {}",
+                "register", ip_addr, auth.username
+            );
+
+            let mut load_auth = load_auth_file().expect("加载认证文件失败!");
+            load_auth.insert(auth.username, auth.password);
+
+            let mut file = File::create(get_auth_path().unwrap()).expect("打开密码文件失败");
+            // 回写进密码存储文件
+            write_content(&mut file, &load_auth).expect("写入认证文件失败");
+
+            let res = ServerResponse {
+                code: ResponseCode::Success,
+                data: (),
+                msg: "register成功".to_string(),
+            };
+            let pass_str = serde_json::to_string(&res).expect("序列化返回值失败");
+
+            writer
+                .write_all(&pass_str.as_bytes())
+                .await
+                .expect("register命令响应失败");
+            // 写入命令结束标志
+            let _ = writer.write_u8(b'\n').await.unwrap();
+        }
     }
 }
 
+pub static mut RUNNING: AtomicBool = AtomicBool::new(true);
+
 pub async fn handle_start_cloud_server(config: &Config) {
-    match load_config() {
-        Err(e) => {
-            error!("加载配置文件失败,原因:{}", e);
-        }
-        Ok(config) => {
-            if let Some(address) = config.address {
-                let listener = TcpListener::bind(address).await.unwrap();
-                loop {
-                    let (socket, _) = listener.accept().await.unwrap();
-                    tokio::spawn(async move {
-                        process_request(socket).await;
-                    });
-                }
-            } else {
-                error!("server启动地址为空");
+    if let Some(address) = &config.address {
+        info!("pass cloud server is starting...");
+        let listener = TcpListener::bind(address).await.unwrap();
+        info!("pass cloud server listening on {}", address);
+        unsafe {
+            while RUNNING.load(Ordering::Acquire) {
+                let (socket, addr) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    process_request(socket, addr).await;
+                });
             }
         }
+        info!("pass cloud server is stopped ")
     }
 }
 pub async fn handle_stop_cloud_server() {
-    match load_config() {
-        Err(e) => {
-            error!("加载配置文件失败,原因:{}", e);
-        }
-        Ok(config) => {
-            if let Some(address) = config.address {
-                let listener = TcpListener::bind(address).await.unwrap();
-                loop {
-                    let (socket, _) = listener.accept().await.unwrap();
-                    tokio::spawn(async move {
-                        process_request(socket).await;
-                    });
-                }
-            } else {
-                error!("server启动地址为空");
-            }
-        }
+    unsafe {
+        info!("pass cloud server is stopping");
+        RUNNING.store(false, Ordering::Release);
     }
 }
 
+pub async fn read_to_string<'a>(stream: &mut ReadHalf<'a>) -> String {
+    // 读取缓冲区数据
+    let mut buffer = Vec::new();
+
+    let mut reader = BufReader::new(stream);
+    let _ = reader.read_until(b'\n', &mut buffer).await.unwrap();
+    let res_str = String::from_utf8(buffer).expect("读取utf字符串失败");
+
+    return res_str;
+}
+
 pub async fn handle_pull_pass(config: &Config) {
-    match load_config() {
-        Err(e) => {
-            error!("加载配置文件失败,原因:{}", e);
+    if check_authorization_config() {
+        if let Some(address) = &config.cloud_address {
+            // 组织push命令结构
+            let auth = Authorization {
+                username: config.username.clone().unwrap(),
+                password: config.password.clone().unwrap(),
+            };
+            let cmd = ReqCommand::Pull { auth };
+            // 连接server
+            let mut stream = TcpStream::connect(address).await.unwrap();
+
+            let (mut reader, writer) = stream.split();
+            let str = serde_json::to_string(&cmd).expect("序列化pull命令失败");
+            let mut writer = BufWriter::new(writer);
+
+            // 发送pull命令
+            let _ = writer.write(&str.as_bytes()).await.unwrap();
+            // 写入命令终止标志
+            let _ = writer.write_u8(b'\n').await.unwrap();
+            writer.flush().await.unwrap();
+
+            let res_str = read_to_string(&mut reader).await;
+            let cmd: ServerResponse<PullPasswords> =
+                serde_json::from_str(&res_str).expect("序列化服务器返回值失败");
+
+            handle_request_data(cmd, |_| {}, handle_rewrite_pass_file);
         }
-        Ok(config) => {
-            if check_authorization_config() {
-                if let Some(address) = config.cloud_address {
-                    // 组织push命令结构
-                    let auth = Authorization {
-                        username: config.username.unwrap().clone(),
-                        password: config.password.unwrap().clone(),
-                    };
-                    let cmd = ReqCommand::Pull { auth };
-                    // 连接server
-                    let mut listener = TcpStream::connect(address).await.unwrap();
-
-                    let bytes = serde_json::to_vec(&cmd).expect("序列化pull命令失败");
-                    // 发送pull命令
-                    let _ = listener.write_all(&bytes).await.unwrap();
-
-                    // 接收server返回值
-                    let mut res_str = String::new();
-                    listener.read_to_string(&mut res_str).await.unwrap();
-
-                    let cmd: ServerResponse<PullPasswords> =
-                        serde_json::from_str(&res_str).expect("序列化服务器返回值失败");
-
-                    handle_request_data(cmd, |pass| {}, handle_rewrite_pass_file);
-                }
-            } else {
-                error!("server地址为空");
-            }
-        }
+    } else {
+        error!("server地址为空");
     }
 }
 
@@ -292,45 +403,70 @@ pub fn handle_request_data<T, F1, F2>(
     }
 }
 
-pub async fn handle_push_pass(config: &Config, pass: Passwords) {
-    match load_config() {
-        Err(e) => {
-            error!("加载配置文件失败,原因:{}", e);
+pub async fn handle_push_pass(config: &Config, passwords: Passwords) {
+    if check_authorization_config() {
+        if let Some(address) = &config.cloud_address {
+            // 组织push命令结构
+            let auth = Authorization {
+                username: config.username.clone().unwrap(),
+                password: config.password.clone().unwrap(),
+            };
+            let cmd = ReqCommand::Push { auth, passwords };
+            // 连接server
+            let mut stream = TcpStream::connect(address).await.unwrap();
+
+            info!("connected server: {} successful", address);
+
+            let str = serde_json::to_string(&cmd).expect("序列化push命令失败");
+            let (mut reader, writer) = stream.split();
+            let mut writer = BufWriter::new(writer);
+            info!("sending push command...");
+            // 发送push命令
+            let _ = writer.write(&str.as_bytes()).await.unwrap();
+
+            let _ = writer.write_u8(b'\n').await.unwrap();
+            // 关闭tcp连接
+            writer.flush().await.unwrap();
+            // 接收server返回值
+            let res_str = read_to_string(&mut reader).await;
+            info!("waiting for server response...");
+            let cmd: ServerResponse<()> =
+                serde_json::from_str(&res_str).expect("序列化服务器返回值失败");
+
+            handle_request_data(cmd, |_s| {}, |_s| {});
         }
-        Ok(config) => {
-            if check_authorization_config() {
-                if let Some(address) = config.cloud_address {
-                    match load_pass() {
-                        Ok(passwords) => {
-                            // 组织push命令结构
-                            let auth = Authorization {
-                                username: config.username.unwrap().clone(),
-                                password: config.password.unwrap().clone(),
-                            };
-                            let cmd = ReqCommand::Push { auth, passwords };
-                            // 连接server
-                            let mut listener = TcpStream::connect(address).await.unwrap();
+    } else {
+        error!("server地址为空");
+    }
+}
 
-                            let bytes = serde_json::to_vec(&cmd).expect("序列化push命令失败");
-                            // 发送push命令
-                            let _ = listener.write_all(&bytes).await.unwrap();
+pub async fn handle_register_pass(config: &Config) {
+    if check_authorization_config() {
+        if let Some(address) = &config.cloud_address {
+            // 组织push命令结构
+            let auth = Authorization {
+                username: config.username.clone().unwrap(),
+                password: config.password.clone().unwrap(),
+            };
+            let cmd = ReqCommand::Register { auth };
+            // 连接server
+            let mut stream = TcpStream::connect(address).await.unwrap();
 
-                            // 接收server返回值
-                            let mut res_str = String::new();
-                            listener.read_to_string(&mut res_str).await.unwrap();
-                            let cmd: ServerResponse<()> =
-                                serde_json::from_str(&res_str).expect("序列化服务器返回值失败");
+            let (mut reader, writer) = stream.split();
+            let mut writer = BufWriter::new(writer);
 
-                            handle_request_data(cmd, |s| {}, |s| {});
-                        }
-                        Err(_) => {
-                            error!("加载密码文件失败")
-                        }
-                    }
-                } else {
-                    error!("server地址为空");
-                }
-            }
+            let str = serde_json::to_string(&cmd).expect("序列化push命令失败");
+            // 发送push命令
+            let _ = writer.write(&str.as_bytes()).await.unwrap();
+            let _ = writer.write_u8(b'\n').await.unwrap();
+            writer.flush().await.expect("刷新接失败");
+
+            // 接收server返回值
+            let res_str = read_to_string(&mut reader).await;
+            let cmd: ServerResponse<()> =
+                serde_json::from_str(&res_str).expect("序列化服务器返回值失败");
+
+            handle_request_data(cmd, |_s| {}, |_s| {});
         }
     }
 }

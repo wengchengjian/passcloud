@@ -10,7 +10,7 @@ pub fn write_content<T>(file: &mut File, t: &T) -> Result<(), Box<dyn Error>>
 where
     T: Serialize,
 {
-    let content = serde_json::to_string(t)?;
+    let content = serde_json::to_string_pretty(t)?;
     file.write_all(content.as_bytes())?;
     Ok(())
 }

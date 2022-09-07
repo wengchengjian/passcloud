@@ -1,20 +1,26 @@
 extern crate core;
 
 use clap::Parser;
-use log::{error, info, warn};
+use env_logger::{Builder, Target};
+use log::{error, info, warn, LevelFilter};
 use passcloud;
 use passcloud::{
-    check_cloud_config, check_common_config, get_pass_home, handle, load_pass, ClientSubCmd,
-    Commands, Config, ServerSubCmd,
+    check_cloud_config, check_common_config, get_pass_home, handle, ClientSubCmd, Commands, Config,
+    ServerSubCmd,
 };
-use std::process;
+
+fn init_log() {
+    let mut builder = Builder::from_default_env();
+    builder.target(Target::Stdout);
+    builder.filter_level(LevelFilter::Info);
+    builder.init();
+}
 
 #[tokio::main]
 async fn main() {
     // 初始化日志
-    env_logger::init();
-
-    if let Some(path) = get_pass_home() {
+    init_log();
+    if let Some(_) = get_pass_home() {
         let mut load_config = passcloud::load_config().expect("加载配置文件失败");
 
         match check_common_config(&load_config) {
@@ -128,10 +134,12 @@ async fn main() {
                                     error!("检查配置出现错误,原因:{}", e);
                                 }
                             },
+
+                            ClientSubCmd::Register => {
+                                handle::handle_register_pass(&load_config).await;
+                            }
                         },
                     }
-                } else {
-                    warn!("Command not found");
                 }
             }
         }
