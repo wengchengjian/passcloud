@@ -2,8 +2,8 @@ use crate::file::write_content;
 use crate::request::ReqCommand;
 use crate::response::{PullPasswords, ResponseCode, ServerResponse};
 use crate::{
-    check_authorization, check_authorization_config, check_common_config, decrypt_from_utf8,
-    get_auth_path, get_config_path, get_pass_file_path, get_pass_home, get_pass_path,
+    check_authorization, check_authorization_config, decrypt_from_utf8,
+    get_auth_path, get_config_path, get_pass_path,
     load_auth_file, load_config, load_pass, Authorization, Config, Password, Passwords, TIME_FMT,
 };
 use chrono::{DateTime, Local, NaiveDateTime, Utc};
@@ -16,7 +16,7 @@ use std::error::Error;
 use std::fs::File;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::tcp::{ReadHalf, WriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -31,6 +31,10 @@ pub fn handle_pass_config_cli(config: &mut Config, new_config: Config) {
 
     if let Some(cloud_address) = new_config.cloud_address {
         config.cloud_address = Some(cloud_address);
+    }
+
+    if let Some(address) = new_config.address {
+        config.address = Some(address);
     }
     let mut file = File::create(get_config_path().expect("PASS_HOME环境变量未设置"))
         .expect("获取配置文件失败！");
@@ -173,7 +177,7 @@ pub fn handle_set_cli(
     Ok(())
 }
 
-async fn write_cmd<T>(cmd: ServerResponse<T>, writer: &mut BufWriter<WriteHalf>)
+async fn write_cmd<'a, T>(cmd: T, writer: &mut BufWriter<WriteHalf<'a>>)
 where
     T: Serialize,
 {
@@ -193,7 +197,6 @@ async fn process_request(mut socket: TcpStream, addr: SocketAddr) {
     let mut writer = BufWriter::new(writer);
 
     let str_req = read_to_string(&mut reader).await;
-    info!("receive str:{str_req}");
     let cmd: ReqCommand = serde_json::from_str(&str_req).expect("序列化数据失败!");
     match cmd {
         ReqCommand::Pull { auth } => {
@@ -211,7 +214,7 @@ async fn process_request(mut socket: TcpStream, addr: SocketAddr) {
                     data: pull_pass,
                     msg: "pull 命令成功".to_string(),
                 };
-                write_cmd(res, &mut writer);
+                write_cmd(res, &mut writer).await;
             } else {
                 info!("认证失败");
                 let res = ServerResponse {
@@ -219,7 +222,7 @@ async fn process_request(mut socket: TcpStream, addr: SocketAddr) {
                     data: (),
                     msg: "认证失败".to_string(),
                 };
-                write_cmd(res, &mut writer);
+                write_cmd(res, &mut writer).await;
             }
         }
         ReqCommand::Push { auth, passwords } => {
@@ -244,16 +247,16 @@ async fn process_request(mut socket: TcpStream, addr: SocketAddr) {
                     data: (),
                     msg: "push成功".to_string(),
                 };
-                let pass_str = serde_json::to_string(&res).expect("序列化返回值失败");
 
-                writer
-                    .write_all(&pass_str.as_bytes())
-                    .await
-                    .expect("push命令响应失败");
-                // 写入命令结束标志
-                let _ = writer.write_u8(b'\n').await.unwrap();
+                write_cmd(res, &mut writer).await;
             } else {
                 info!("认证失败");
+                let res = ServerResponse {
+                    code: ResponseCode::Failure,
+                    data: (),
+                    msg: "认证失败".to_string(),
+                };
+                write_cmd(res, &mut writer).await;
             }
         }
         ReqCommand::Stop { auth } => {
@@ -263,11 +266,24 @@ async fn process_request(mut socket: TcpStream, addr: SocketAddr) {
                     "stop", ip_addr, auth.username
                 );
 
+                info!("server is stopping");
                 unsafe {
-                    RUNNING.store(false, Ordering::Release);
+                    RUNNING.store(false, Ordering::Relaxed);
                 }
+                let res = ServerResponse {
+                    code: ResponseCode::Success,
+                    data: (),
+                    msg: "关闭成功".to_string(),
+                };
+                write_cmd(res, &mut writer).await;
             } else {
                 info!("认证失败");
+                let res = ServerResponse {
+                    code: ResponseCode::Failure,
+                    data: (),
+                    msg: "认证失败".to_string(),
+                };
+                write_cmd(res, &mut writer).await;
             }
         }
         ReqCommand::Register { auth } => {
@@ -288,14 +304,7 @@ async fn process_request(mut socket: TcpStream, addr: SocketAddr) {
                 data: (),
                 msg: "register成功".to_string(),
             };
-            let pass_str = serde_json::to_string(&res).expect("序列化返回值失败");
-
-            writer
-                .write_all(&pass_str.as_bytes())
-                .await
-                .expect("register命令响应失败");
-            // 写入命令结束标志
-            let _ = writer.write_u8(b'\n').await.unwrap();
+            write_cmd(res, &mut writer).await;
         }
     }
 }
@@ -308,11 +317,16 @@ pub async fn handle_start_cloud_server(config: &Config) {
         let listener = TcpListener::bind(address).await.unwrap();
         info!("pass cloud server listening on {}", address);
         unsafe {
-            while RUNNING.load(Ordering::Acquire) {
+            loop {
                 let (socket, addr) = listener.accept().await.unwrap();
-                tokio::spawn(async move {
+                let task = tokio::spawn(async move {
                     process_request(socket, addr).await;
                 });
+                if !RUNNING.load(Ordering::Acquire) && !task.is_finished() {
+                    //阻塞直到最后一个任务完成
+                    task.await.expect("last task failed before server stopped");
+                    break;
+                }
             }
         }
         info!("pass cloud server is stopped ")
@@ -347,16 +361,13 @@ pub async fn handle_pull_pass(config: &Config) {
             let cmd = ReqCommand::Pull { auth };
             // 连接server
             let mut stream = TcpStream::connect(address).await.unwrap();
+            info!("connected server: {} successful", address);
 
             let (mut reader, writer) = stream.split();
-            let str = serde_json::to_string(&cmd).expect("序列化pull命令失败");
             let mut writer = BufWriter::new(writer);
-
-            // 发送pull命令
-            let _ = writer.write(&str.as_bytes()).await.unwrap();
-            // 写入命令终止标志
-            let _ = writer.write_u8(b'\n').await.unwrap();
-            writer.flush().await.unwrap();
+            info!("sending pull command...");
+            write_cmd(cmd, &mut writer).await;
+            info!("waiting for server response...");
 
             let res_str = read_to_string(&mut reader).await;
             let cmd: ServerResponse<PullPasswords> =
@@ -397,7 +408,7 @@ pub fn handle_request_data<T, F1, F2>(
             handle_failure(cmd.data);
         }
         ResponseCode::Success => {
-            info!("请求服务器失败,原因:{}", cmd.msg);
+            info!("请求服务器成功,消息:{}", cmd.msg);
             handle_success(cmd.data);
         }
     }
@@ -417,22 +428,16 @@ pub async fn handle_push_pass(config: &Config, passwords: Passwords) {
 
             info!("connected server: {} successful", address);
 
-            let str = serde_json::to_string(&cmd).expect("序列化push命令失败");
             let (mut reader, writer) = stream.split();
+
             let mut writer = BufWriter::new(writer);
             info!("sending push command...");
-            // 发送push命令
-            let _ = writer.write(&str.as_bytes()).await.unwrap();
-
-            let _ = writer.write_u8(b'\n').await.unwrap();
-            // 关闭tcp连接
-            writer.flush().await.unwrap();
+            write_cmd(cmd, &mut writer).await;
             // 接收server返回值
             let res_str = read_to_string(&mut reader).await;
             info!("waiting for server response...");
             let cmd: ServerResponse<()> =
                 serde_json::from_str(&res_str).expect("序列化服务器返回值失败");
-
             handle_request_data(cmd, |_s| {}, |_s| {});
         }
     } else {
@@ -451,16 +456,41 @@ pub async fn handle_register_pass(config: &Config) {
             let cmd = ReqCommand::Register { auth };
             // 连接server
             let mut stream = TcpStream::connect(address).await.unwrap();
+            info!("connected server: {} successful", address);
 
             let (mut reader, writer) = stream.split();
             let mut writer = BufWriter::new(writer);
+            info!("sending register command...");
+            write_cmd(cmd, &mut writer).await;
+            info!("waiting for server response...");
+            // 接收server返回值
+            let res_str = read_to_string(&mut reader).await;
+            let cmd: ServerResponse<()> =
+                serde_json::from_str(&res_str).expect("序列化服务器返回值失败");
 
-            let str = serde_json::to_string(&cmd).expect("序列化push命令失败");
-            // 发送push命令
-            let _ = writer.write(&str.as_bytes()).await.unwrap();
-            let _ = writer.write_u8(b'\n').await.unwrap();
-            writer.flush().await.expect("刷新接失败");
+            handle_request_data(cmd, |_s| {}, |_s| {});
+        }
+    }
+}
 
+pub async fn handle_stop_pass(config: &Config) {
+    if check_authorization_config() {
+        if let Some(address) = &config.cloud_address {
+            // 组织push命令结构
+            let auth = Authorization {
+                username: config.username.clone().unwrap(),
+                password: config.password.clone().unwrap(),
+            };
+            let cmd = ReqCommand::Stop { auth };
+            // 连接server
+            let mut stream = TcpStream::connect(address).await.unwrap();
+            info!("connected server: {} successful", address);
+
+            let (mut reader, writer) = stream.split();
+            let mut writer = BufWriter::new(writer);
+            info!("sending stop command...");
+            write_cmd(cmd, &mut writer).await;
+            info!("waiting for server response...");
             // 接收server返回值
             let res_str = read_to_string(&mut reader).await;
             let cmd: ServerResponse<()> =

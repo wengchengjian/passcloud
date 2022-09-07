@@ -1,16 +1,14 @@
-use chrono::{Date, DateTime, Local};
+use chrono::Local;
 use clap::{Parser, Subcommand};
 use log::{error, info, warn};
 use passwords::{analyzer, scorer, PasswordGenerator};
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::{env, fs};
-use tokio::io::{AsyncReadExt, ReadHalf};
-use tokio::net::TcpStream;
 
 mod encrypt;
 pub mod file;
@@ -102,6 +100,7 @@ pub enum ClientSubCmd {
     Push,
     Pull,
     Register,
+    Stop,
 }
 
 #[derive(Subcommand, Clone)]
@@ -296,22 +295,16 @@ pub fn decrypt_from_utf8(arr: &Vec<u8>) -> String {
 }
 
 pub fn check_authorization(auth: &Authorization) -> bool {
-    match load_auth_file() {
-        Err(e) => {
-            error!("加载认证密码文件失败,原因:{}", e);
+    let authorizations = load_auth_file().expect("加载密码文件失败");
+
+    if authorizations.contains_key(&auth.username) {
+        if let Some(password) = authorizations.get(&auth.username) {
+            return password.eq(&auth.password);
+        } else {
             false
         }
-        Ok(authorizations) => {
-            if authorizations.contains_key(&auth.username) {
-                if let Some(password) = authorizations.get(&auth.username) {
-                    return password.eq(&auth.password);
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
-        }
+    } else {
+        false
     }
 }
 
