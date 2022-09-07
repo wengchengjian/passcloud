@@ -7,8 +7,7 @@ use crate::{
     load_auth_file, load_config, load_pass, Authorization, Config, Password, Passwords, TIME_FMT,
 };
 use chrono::{DateTime, Local, NaiveDateTime, Utc};
-use clipboard::windows_clipboard::WindowsClipboardContext;
-use clipboard::ClipboardProvider;
+use clipboard::{ClipboardContext, ClipboardProvider};
 use log::{error, info, warn};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -106,7 +105,7 @@ pub fn handle_get_cli(
                                     "------ latest password:{},version:{} createAt:{}",
                                     password, last_pass.version, last_pass.timestamp
                                 );
-                                let mut provider = WindowsClipboardContext::new().unwrap();
+                                let mut provider = ClipboardContext::new().unwrap();
                                 provider
                                     .set_contents(password)
                                     .expect("复制密码到缓冲区失败");

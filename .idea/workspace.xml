@@ -15,11 +15,9 @@
     <cargoProject FILE="$PROJECT_DIR$/Cargo.toml" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="10d8f7ec-edb1-4f99-b93a-ff21f80f0211" name="Changes" comment="feat: 添加日志,新增push,pull命令的处理">
+    <list default="true" id="10d8f7ec-edb1-4f99-b93a-ff21f80f0211" name="Changes" comment="fix: 抽取公共函数">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/handle.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/handle.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/lib.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/lib.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.rs" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -234,7 +232,7 @@
       <workItem from="1662534665568" duration="1000" />
       <workItem from="1662536554017" duration="954000" />
       <workItem from="1662537551783" duration="14456000" />
-      <workItem from="1662552754935" duration="1061000" />
+      <workItem from="1662552754935" duration="5336000" />
     </task>
     <task id="LOCAL-00001" summary="feat:get,set,config,gen命令已完成">
       <created>1659885744565</created>
@@ -264,7 +262,14 @@
       <option name="project" value="LOCAL" />
       <updated>1661356946711</updated>
     </task>
-    <option name="localTasksCounter" value="5" />
+    <task id="LOCAL-00005" summary="fix: 抽取公共函数">
+      <created>1662554174031</created>
+      <option name="number" value="00005" />
+      <option name="presentableId" value="LOCAL-00005" />
+      <option name="project" value="LOCAL" />
+      <updated>1662554174031</updated>
+    </task>
+    <option name="localTasksCounter" value="6" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -287,7 +292,8 @@
     <MESSAGE value="feat: 添加服务端和客户端代码" />
     <MESSAGE value="feat: 添加idea" />
     <MESSAGE value="update: 更新idea" />
-    <option name="LAST_COMMIT_MESSAGE" value="update: 更新idea" />
+    <MESSAGE value="fix: 抽取公共函数" />
+    <option name="LAST_COMMIT_MESSAGE" value="fix: 抽取公共函数" />
   </component>
   <component name="XSLT-Support.FileAssociations.UIState">
     <expand />
