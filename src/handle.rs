@@ -2,9 +2,9 @@ use crate::file::write_content;
 use crate::request::ReqCommand;
 use crate::response::{PullPasswords, ResponseCode, ServerResponse};
 use crate::{
-    check_authorization, check_authorization_config, decrypt_from_utf8,
-    get_auth_path, get_config_path, get_pass_path,
-    load_auth_file, load_config, load_pass, Authorization, Config, Password, Passwords, TIME_FMT,
+    check_authorization, check_authorization_config, decrypt_from_utf8, get_auth_path,
+    get_config_path, get_pass_path, load_auth_file, load_config, load_pass, Authorization, Config,
+    Password, Passwords, TIME_FMT,
 };
 use chrono::{DateTime, Local, NaiveDateTime, Utc};
 use clipboard::{ClipboardContext, ClipboardProvider};
@@ -438,6 +438,8 @@ pub async fn handle_push_pass(config: &Config, passwords: Passwords) {
             let cmd: ServerResponse<()> =
                 serde_json::from_str(&res_str).expect("序列化服务器返回值失败");
             handle_request_data(cmd, |_s| {}, |_s| {});
+            // 关闭连接
+            writer.shutdown().await.unwrap();
         }
     } else {
         error!("server地址为空");
@@ -468,6 +470,8 @@ pub async fn handle_register_pass(config: &Config) {
                 serde_json::from_str(&res_str).expect("序列化服务器返回值失败");
 
             handle_request_data(cmd, |_s| {}, |_s| {});
+            // 关闭连接
+            writer.shutdown().await.unwrap();
         }
     }
 }
@@ -494,8 +498,9 @@ pub async fn handle_stop_pass(config: &Config) {
             let res_str = read_to_string(&mut reader).await;
             let cmd: ServerResponse<()> =
                 serde_json::from_str(&res_str).expect("序列化服务器返回值失败");
-
             handle_request_data(cmd, |_s| {}, |_s| {});
+            // 关闭连接
+            writer.shutdown().await.unwrap();
         }
     }
 }
